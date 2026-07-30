@@ -37,13 +37,12 @@ logRequiredEnvOnStartup();
 
 // CORS configuration to allow requests from multiple domains, including local dev
 const allowedOrigins = [
-  'https://leveragex.shop',
-  'https://www.leveragex.shop',
-  'https://leveragex-p56c.onrender.com',
+ ?
   'https://front-leveragex.onrender.com',
-  'https://leveragex-2uvw.onrender.com',
+  //'https://leveragex-2uvw.onrender.com',
   'http://localhost:3000',
   'http://127.0.0.1:3000',
+  //https://front-leveragex.onrender.com
   ...(process.env.ALLOWED_ORIGINS || '')
     .split(',')
     .map((origin) => origin.trim())
