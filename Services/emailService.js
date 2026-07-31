@@ -5,7 +5,14 @@ function env(key) {
 }
 
 function smtpPass() {
-  return env('SMTP_PASS').replace(/\s+/g, '');
+  // Brevo SMTP keys must keep their exact value (do not strip hyphens).
+  // Only strip spaces for Gmail-style app passwords.
+  const raw = env('SMTP_PASS');
+  const host = env('SMTP_HOST').toLowerCase();
+  if (host.includes('brevo') || raw.startsWith('xsmtpsib-')) {
+    return raw;
+  }
+  return raw.replace(/\s+/g, '');
 }
 
 function isSmtpConfigured() {
@@ -13,7 +20,7 @@ function isSmtpConfigured() {
 }
 
 function getTransportOptionsList() {
-  const user = env('SMTP_USER').toLowerCase();
+  const user = env('SMTP_USER');
   const pass = smtpPass();
   const timeouts = {
     connectionTimeout: Number(env('SMTP_CONNECTION_TIMEOUT_MS') || 20000),
@@ -21,43 +28,43 @@ function getTransportOptionsList() {
     socketTimeout: Number(env('SMTP_SOCKET_TIMEOUT_MS') || 30000),
   };
 
-  // Try 465 first — more reliable from some cloud hosts (incl. Render)
-  return [
-    {
-      label: 'smtp.gmail.com:465',
+  const list = [];
+  const host = env('SMTP_HOST') || 'smtp-relay.brevo.com';
+  const port = Number(env('SMTP_PORT') || 587);
+  const secure = String(env('SMTP_SECURE') || '').toLowerCase() === 'true';
+
+  // Primary: Brevo / custom SMTP over HTTPS-friendly cloud ports
+  list.push({
+    label: `${host}:${port}`,
+    options: {
+      host,
+      port,
+      secure,
+      requireTLS: !secure && port === 587,
+      auth: { user, pass },
+      ...timeouts,
+    },
+  });
+
+  // Extra Brevo attempt on 465 if primary is 587
+  if (host.includes('brevo') && port === 587) {
+    list.push({
+      label: 'smtp-relay.brevo.com:465',
       options: {
-        host: 'smtp.gmail.com',
+        host: 'smtp-relay.brevo.com',
         port: 465,
         secure: true,
         auth: { user, pass },
         ...timeouts,
       },
-    },
-    {
-      label: 'smtp.gmail.com:587',
-      options: {
-        host: 'smtp.gmail.com',
-        port: 587,
-        secure: false,
-        requireTLS: true,
-        auth: { user, pass },
-        ...timeouts,
-      },
-    },
-    {
-      label: 'service:gmail',
-      options: {
-        service: 'gmail',
-        auth: { user, pass },
-        ...timeouts,
-      },
-    },
-  ];
+    });
+  }
+
+  return list;
 }
 
 function fromAddress() {
-  const user = env('SMTP_USER').toLowerCase();
-  const from = env('EMAIL_FROM').toLowerCase() || user;
+  const from = env('EMAIL_FROM').toLowerCase() || env('SMTP_USER').toLowerCase();
   return from;
 }
 
@@ -79,7 +86,7 @@ async function verifySmtpOnStartup() {
   for (const { label, options } of getTransportOptionsList()) {
     try {
       await nodemailer.createTransport(options).verify();
-      console.log(`[Email] SMTP verified via ${label} for ${env('SMTP_USER').toLowerCase()}`);
+      console.log(`[Email] SMTP verified via ${label} as ${env('SMTP_USER')}`);
       return true;
     } catch (error) {
       lastError = error;
