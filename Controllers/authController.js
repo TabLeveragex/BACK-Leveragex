@@ -1,9 +1,9 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const User = require("../Models/userModel");
+const { clientIp } = require('../utils/clientIp');
 const { sendWelcomeEmail } = require('../Services/emailService');
-const { isLegitGmailAddress } = require('../Services/gmailAddressService');
-const { clientIp } = require('../Services/captchaService');
+const { isLegitEmailAddress } = require('../Services/emailValidationService');
 
 const signup = async (req, res) => {
     try {
@@ -32,16 +32,18 @@ const signup = async (req, res) => {
 
         console.log('[Signup] created userId:', String(userModel._id), 'ip:', signupIp || 'unknown');
 
-        if (isLegitGmailAddress(email)) {
-            const mailResult = await sendWelcomeEmail({ email, fullName });
-            if (!mailResult.ok) {
-                await User.deleteOne({ _id: userModel._id });
-                const message =
-                    mailResult.skipped
-                        ? 'Email service is not configured. Signup cannot complete.'
-                        : 'Could not send welcome email. Please try again later.';
-                return res.status(503).json({ message, success: false });
+        // Welcome mail is best-effort: never block successful signup.
+        if (isLegitEmailAddress(email)) {
+            try {
+                const mailResult = await sendWelcomeEmail({ email, fullName });
+                if (!mailResult.ok) {
+                    console.warn('[Signup] Welcome email not sent:', mailResult.error || mailResult.skipped);
+                }
+            } catch (mailErr) {
+                console.warn('[Signup] Welcome email error:', mailErr.message || mailErr);
             }
+        } else {
+            console.log('[Signup] Skipping welcome email — address not treated as legit:', String(email || '').trim().toLowerCase());
         }
 
         res.status(201).json({ message: "Signup successful", success: true });

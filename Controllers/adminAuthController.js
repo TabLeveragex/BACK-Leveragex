@@ -1,21 +1,20 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const Admin = require('../Models/adminModel');
-const { getClientIp, logAdminLoginAttempt } = require('../Services/adminAuditService');
-const { sendAdminOtpEmail } = require('../Services/emailService');
-const { getAdminOtpRecipientEmail } = require('../Services/adminOtpRecipientService');
-const {
-  createAdminOtpChallenge,
-  verifyAdminOtpChallenge,
-} = require('../Services/adminOtpService');
+const { logAdminLoginAttempt } = require('../Services/adminAuditService');
 const {
   hasActiveAdminSession,
   registerAdminSession,
-  clearAdminSessionById,
 } = require('../Services/adminSessionService');
+const { sendAdminOtpEmail } = require('../Services/emailService');
+const {
+  createAdminOtpChallenge,
+  verifyAdminOtpChallenge,
+  getAdminOtpRecipientEmail,
+} = require('../Services/adminOtpService');
 
 const ACTIVE_SESSION_MSG =
-  'Another admin is already logged in. Only one admin can use the dashboard at a time.';
+  'Another admin is already logged in. Only one admin session is allowed. Delete the lock in MongoDB collection adminactivesessions to allow a new login.';
 
 const adminLogin = async (req, res) => {
   const { loginId, password, traderSessionWasActive = false } = req.body;
@@ -62,68 +61,23 @@ const adminLogin = async (req, res) => {
       return res.status(409).json({ message: ACTIVE_SESSION_MSG, success: false });
     }
 
-    // When SMTP is unavailable, set ADMIN_SKIP_OTP=true on Render to finish login
-    // after captcha + password (same JWT session as the OTP path).
-    const skipOtp =
-      String(process.env.ADMIN_SKIP_OTP || '').trim().toLowerCase() === 'true' ||
-      String(process.env.ADMIN_SKIP_OTP || '').trim() === '1';
-
-    if (skipOtp) {
-      const jwtSecret = process.env.JWT_SECRET;
-      if (!jwtSecret) {
-        console.error('Admin login error: JWT_SECRET is not set');
-        return res.status(503).json({
-          message: 'Server configuration error. Please contact support.',
-          success: false,
-        });
-      }
-
-      const { sessionId } = await registerAdminSession(admin._id);
-      const jwtToken = jwt.sign(
-        {
-          email: admin.email,
-          _id: admin._id,
-          role: 'admin',
-          adminSessionId: sessionId,
-        },
-        jwtSecret,
-        { expiresIn: '24h' }
-      );
-
-      await logAdminLoginAttempt(req, {
-        loginId: admin.email,
-        success: true,
-        stage: 'login_success',
-        traderSessionWasActive: hadTraderSession,
-      });
-
-      return res.status(200).json({
-        message: 'Admin login successful',
-        success: true,
-        jwtToken,
-        adminId: admin._id,
-        email: admin.email,
-        username: admin.username,
-        fullName: admin.fullName,
-      });
-    }
-
-    const { challengeToken, otp } = await createAdminOtpChallenge(admin._id);
-    const otpRecipient = getAdminOtpRecipientEmail(admin);
+    const otpRecipient = getAdminOtpRecipientEmail();
     if (!otpRecipient) {
       return res.status(503).json({
-        message: 'Admin email is not configured. Set ADMIN_EMAIL to your real Gmail on Render.',
+        message: 'ADMIN_EMAIL is not configured. Cannot send login code.',
         success: false,
       });
     }
 
-    console.log(`[AdminLogin] Sending OTP to ${otpRecipient} (admin record: ${admin.email})`);
+    const { challengeToken, otp } = await createAdminOtpChallenge(admin._id);
+    console.log(`[AdminLogin] Sending OTP to ${otpRecipient}`);
 
     const mailResult = await sendAdminOtpEmail({
       email: otpRecipient,
       fullName: admin.fullName,
       otp,
     });
+
     if (!mailResult.ok) {
       await logAdminLoginAttempt(req, {
         loginId: normalizedLoginId,
@@ -132,12 +86,12 @@ const adminLogin = async (req, res) => {
         failureReason: 'email_failed',
         traderSessionWasActive: hadTraderSession,
       });
-      const message =
-        mailResult.skipped
+      return res.status(503).json({
+        message: mailResult.skipped
           ? 'Email service is not configured. Admin login cannot continue.'
-          : 'Could not send admin login code. Check Gmail App Password on Render and redeploy.';
-      console.error('[AdminLogin] OTP email failed:', mailResult.error, mailResult.responseCode || '');
-      return res.status(503).json({ message, success: false });
+          : 'Could not send admin login code. Check Gmail App Password and try again.',
+        success: false,
+      });
     }
 
     await logAdminLoginAttempt(req, {
@@ -148,7 +102,7 @@ const adminLogin = async (req, res) => {
       traderSessionWasActive: hadTraderSession,
     });
 
-    res.status(200).json({
+    return res.status(200).json({
       message: 'Verification code sent to your admin email.',
       success: true,
       requiresOtp: true,
@@ -214,7 +168,6 @@ const adminVerifyOtp = async (req, res) => {
     }
 
     const { sessionId } = await registerAdminSession(admin._id);
-
     const jwtToken = jwt.sign(
       {
         email: admin.email,
@@ -233,7 +186,7 @@ const adminVerifyOtp = async (req, res) => {
       traderSessionWasActive: hadTraderSession,
     });
 
-    res.status(200).json({
+    return res.status(200).json({
       message: 'Admin login successful',
       success: true,
       jwtToken,
@@ -262,28 +215,9 @@ const getAdminMe = async (req, res) => {
   }
 };
 
-function extractAdminToken(req) {
-  const header = req.headers.authorization;
-  if (header?.startsWith('Bearer ')) {
-    return header.slice(7);
-  }
-  return header || null;
-}
-
 const adminLogout = async (req, res) => {
   try {
-    const token = extractAdminToken(req);
-    const jwtSecret = process.env.JWT_SECRET;
-    if (token && jwtSecret) {
-      try {
-        const decoded = jwt.verify(token, jwtSecret);
-        if (decoded?.adminSessionId) {
-          await clearAdminSessionById(decoded.adminSessionId);
-        }
-      } catch {
-        // Token may already be expired; still return success for client cleanup.
-      }
-    }
+    // Local logout only — MongoDB adminactivesessions lock stays until deleted manually.
     res.status(200).json({ message: 'Logged out', success: true });
   } catch (err) {
     console.error('Admin logout error:', err);

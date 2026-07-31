@@ -1,264 +1,87 @@
 const nodemailer = require('nodemailer');
 
-function normalizeEnvValue(value) {
-  let v = String(value || '').trim();
-  if (
-    (v.startsWith('"') && v.endsWith('"')) ||
-    (v.startsWith("'") && v.endsWith("'"))
-  ) {
-    v = v.slice(1, -1).trim();
-  }
-  return v;
+function env(key) {
+  return String(process.env[key] || '').trim();
 }
 
-function normalizeSmtpPass(pass) {
-  return normalizeEnvValue(pass).replace(/\s+/g, '');
+function smtpPass() {
+  return env('SMTP_PASS').replace(/\s+/g, '');
 }
 
-function getSmtpUser() {
-  return normalizeEnvValue(process.env.SMTP_USER).toLowerCase();
+function isSmtpConfigured() {
+  return Boolean(env('SMTP_USER') && smtpPass());
 }
 
-function getSmtpPass() {
-  const primary = normalizeSmtpPass(process.env.SMTP_PASS);
-  if (primary) {
-    return primary;
-  }
-  return normalizeSmtpPass(process.env.SMTP_PASSWORD);
+function createTransport() {
+  return nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    requireTLS: true,
+    auth: {
+      user: env('SMTP_USER').toLowerCase(),
+      pass: smtpPass(),
+    },
+    connectionTimeout: 20000,
+    greetingTimeout: 20000,
+    socketTimeout: 30000,
+  });
 }
 
-function isEmailConfigured() {
-  return Boolean(getSmtpUser() && getSmtpPass());
+function fromAddress() {
+  const user = env('SMTP_USER').toLowerCase();
+  const from = env('EMAIL_FROM').toLowerCase() || user;
+  return from;
 }
 
-function describeTransportOptions(options) {
-  if (options.service) {
-    return `service=${options.service}`;
-  }
-  return `host=${options.host} port=${options.port} secure=${options.secure}`;
-}
-
-function getCustomHostTransportOptions(user, pass) {
-  const host = normalizeEnvValue(process.env.SMTP_HOST);
-  if (!host) {
-    return [];
-  }
-
-  return [
-    withSmtpTimeouts({
-      host,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: String(process.env.SMTP_SECURE || '').toLowerCase() === 'true',
-      auth: { user, pass },
-    }),
-  ];
-}
-
-function withSmtpTimeouts(options) {
-  return {
-    ...options,
-    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 20000),
-    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 20000),
-    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 30000),
-  };
-}
-
-function getGmailTransportOptions(user, pass) {
-  return [
-    withSmtpTimeouts({
-      host: 'smtp.gmail.com',
-      port: 587,
-      secure: false,
-      requireTLS: true,
-      auth: { user, pass },
-    }),
-    withSmtpTimeouts({
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      auth: { user, pass },
-    }),
-    withSmtpTimeouts({
-      service: 'gmail',
-      auth: { user, pass },
-    }),
-  ];
-}
-
-function getTransportOptionsList(user, pass) {
-  const custom = getCustomHostTransportOptions(user, pass);
-  if (custom.length) {
-    return custom;
-  }
-
-  const service = normalizeEnvValue(process.env.SMTP_SERVICE).toLowerCase() || 'gmail';
-  if (service === 'gmail') {
-    return getGmailTransportOptions(user, pass);
-  }
-
-  return [withSmtpTimeouts({ service, auth: { user, pass } })];
-}
-
-function buildFromAddress() {
-  const smtpUser = getSmtpUser();
-  const fromEnv = normalizeEnvValue(process.env.EMAIL_FROM).toLowerCase();
-  const fromEmail = fromEnv || smtpUser;
-  if (!fromEmail) {
-    return '';
-  }
-  if (fromEmail !== smtpUser && smtpUser) {
-    console.warn(
-      `[Email] EMAIL_FROM (${fromEmail}) differs from SMTP_USER (${smtpUser}); using SMTP_USER as From for Gmail compatibility.`
-    );
-    return smtpUser;
-  }
-  return fromEmail;
-}
-
-async function verifyTransport(options) {
-  const transporter = nodemailer.createTransport(options);
-  await transporter.verify();
-}
-
-async function sendWithFallbackTransports(mailOptions) {
-  const user = getSmtpUser();
-  const pass = getSmtpPass();
-  const transports = getTransportOptionsList(user, pass);
-  let lastError = null;
-
-  for (const options of transports) {
-    const label = describeTransportOptions(options);
-    const transporter = nodemailer.createTransport(options);
-    try {
-      const info = await transporter.sendMail(mailOptions);
-      console.log(`[Email] Sent via ${label} to ${mailOptions.to}`);
-      return { ok: true, messageId: info.messageId, transport: label };
-    } catch (error) {
-      lastError = error;
-      console.error(
-        `[Email] Send failed via ${label}: ${error.message}` +
-          (error.responseCode ? ` (code ${error.responseCode})` : '')
-      );
-    }
-  }
-
-  return {
-    ok: false,
-    error: lastError?.message || 'All SMTP transports failed',
-    responseCode: lastError?.responseCode,
-  };
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 async function verifySmtpOnStartup() {
-  if (!isEmailConfigured()) {
-    return;
+  if (!isSmtpConfigured()) {
+    console.error('[Email] SMTP_USER / SMTP_PASS missing — admin 2FA email will fail.');
+    return false;
   }
-
-  const user = getSmtpUser();
-  const pass = getSmtpPass();
-  const transports = getTransportOptionsList(user, pass);
-  let verified = false;
-
-  for (const options of transports) {
-    const label = describeTransportOptions(options);
-    try {
-      await verifyTransport(options);
-      console.log(`[Email] SMTP verified via ${label} for ${user}`);
-      verified = true;
-      break;
-    } catch (error) {
-      console.error(
-        `[Email] SMTP verify failed via ${label}: ${error.message}` +
-          (error.responseCode ? ` (code ${error.responseCode})` : '')
-      );
-    }
-  }
-
-  if (!verified) {
-    console.error(
-      '[Email] Gmail SMTP could not be verified. Regenerate App Password, set SMTP_PASS on Render, then visit https://accounts.google.com/DisplayUnlockCaptcha while logged into the Gmail account.'
-    );
+  try {
+    await createTransport().verify();
+    console.log(`[Email] SMTP verified for ${env('SMTP_USER').toLowerCase()}`);
+    return true;
+  } catch (error) {
+    console.error('[Email] SMTP verify failed:', error.message);
+    return false;
   }
 }
 
-/**
- * Send an email via SMTP (Gmail app password or custom SMTP).
- */
 async function sendEmail({ to, subject, text, html }) {
-  if (!isEmailConfigured()) {
-    const msg = 'SMTP_USER / SMTP_PASS are required but not set';
-    console.error('[Email]', msg);
-    return { ok: false, skipped: true, error: msg };
+  if (!isSmtpConfigured()) {
+    return { ok: false, skipped: true, error: 'SMTP is not configured' };
   }
 
-  const from = buildFromAddress();
   const toAddress = String(to || '').trim().toLowerCase();
-  if (!from) {
-    const msg = 'SMTP_USER is missing or invalid';
-    console.error('[Email]', msg);
-    return { ok: false, error: msg };
-  }
+  const from = fromAddress();
   if (!toAddress) {
-    const msg = 'Recipient email is missing';
-    console.error('[Email]', msg);
-    return { ok: false, error: msg };
+    return { ok: false, error: 'Recipient email is missing' };
   }
 
-  const result = await sendWithFallbackTransports({
-    from,
-    to: toAddress,
-    subject,
-    text,
-    html,
-  });
-
-  if (result.ok) {
-    return { ok: true, messageId: result.messageId };
+  try {
+    const info = await createTransport().sendMail({
+      from: `"LeverageX" <${from}>`,
+      to: toAddress,
+      subject,
+      text,
+      html: html || undefined,
+    });
+    console.log(`[Email] Sent to ${toAddress} id=${info.messageId}`);
+    return { ok: true, messageId: info.messageId };
+  } catch (error) {
+    console.error('[Email] Send failed:', error.message);
+    return { ok: false, error: error.message, responseCode: error.responseCode };
   }
-
-  return {
-    ok: false,
-    error: result.error,
-    responseCode: result.responseCode,
-  };
-}
-
-async function sendWelcomeEmail({ email, fullName }) {
-  const name = String(fullName || 'Trader').trim();
-  return sendEmail({
-    to: email,
-    subject: 'Welcome to LeverageX',
-    text: ` Dear ${name},
-
-Thank you for choosing Leveragex (leveragex.shop) for your Forex trading and investing needs!
-
-
-We're excited to have you onboard and look forward to helping you navigate the markets. Our team is dedicated to providing top-notch services and support to ensure your success.
-
-
-To get started, please find below some helpful resources:
-
-
-- Our Website: leveragex (for market updates, tutorials, and more)
-- Support Email: leveragexfund@gmail.com (for any questions or concerns)
-
-
-Next Steps:
-
-
-1. Verify your account (if you haven't already)
-2. Explore our trading platforms and tools
-3. Reach out to our support team for personalized guidance
-
-
-We're committed to helping you achieve your financial goals. Stay updated on market trends and analysis through our regular newsletters and updates.
-
-
-Best regards,
-Suresh Sharma 
-Leveragex Team
-leveragexfund@gmail.com`,
-  });
 }
 
 async function sendAdminOtpEmail({ email, fullName, otp }) {
@@ -273,10 +96,81 @@ async function sendAdminOtpEmail({ email, fullName, otp }) {
   });
 }
 
+async function sendWelcomeEmail({ email, fullName }) {
+  const name = String(fullName || 'Trader').trim() || 'Trader';
+  const safeName = escapeHtml(name);
+  const site = 'https://leveragex.shop';
+  const support = fromAddress() || 'leveragexfund@gmail.com';
+
+  const text =
+    `Dear ${name},\n\n` +
+    `Welcome to LeverageX!\n\n` +
+    `Thank you for joining us. Your account is ready — you can sign in and explore plans, watchlists, and your trading dashboard.\n\n` +
+    `Website: ${site}\n` +
+    `Support: ${support}\n\n` +
+    `Best regards,\n` +
+    `The LeverageX Team`;
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Welcome to LeverageX</title>
+</head>
+<body style="margin:0;padding:0;background:#f3faf7;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3faf7;padding:32px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="560" cellspacing="0" cellpadding="0" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #d1fae5;border-radius:16px;overflow:hidden;box-shadow:0 8px 24px rgba(16,185,129,0.08);">
+          <tr>
+            <td style="padding:28px 28px 16px;background:linear-gradient(135deg,#10b981,#06b6d4);">
+              <p style="margin:0;color:#ecfdf5;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;font-weight:600;">LeverageX</p>
+              <h1 style="margin:10px 0 0;color:#ffffff;font-size:26px;line-height:1.25;font-weight:700;">Welcome aboard, ${safeName}</h1>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:28px;background:#ffffff;">
+              <p style="margin:0 0 14px;color:#0f172a;font-size:15px;line-height:1.6;">
+                Thanks for creating your LeverageX account. You're all set to explore market plans, manage your watchlists, and track performance from your dashboard.
+              </p>
+              <p style="margin:0 0 22px;color:#475569;font-size:14px;line-height:1.6;">
+                Sign in anytime to get started. If you need help, our support team is ready.
+              </p>
+              <a href="${site}" style="display:inline-block;background:#10b981;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:12px 20px;border-radius:10px;">
+                Open LeverageX
+              </a>
+              <hr style="border:none;border-top:1px solid #e2e8f0;margin:28px 0;" />
+              <p style="margin:0;color:#64748b;font-size:12px;line-height:1.5;">
+                Website: <a href="${site}" style="color:#0d9488;text-decoration:none;">${site}</a><br />
+                Support: <a href="mailto:${escapeHtml(support)}" style="color:#0d9488;text-decoration:none;">${escapeHtml(support)}</a>
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 28px 24px;background:#ffffff;color:#94a3b8;font-size:11px;line-height:1.5;">
+              You're receiving this because you signed up at LeverageX. If this wasn't you, you can ignore this email.
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  return sendEmail({
+    to: email,
+    subject: 'Welcome to LeverageX',
+    text,
+    html,
+  });
+}
+
 module.exports = {
-  isEmailConfigured,
+  isSmtpConfigured,
   verifySmtpOnStartup,
   sendEmail,
-  sendWelcomeEmail,
   sendAdminOtpEmail,
+  sendWelcomeEmail,
 };

@@ -1,5 +1,6 @@
 /**
  * Removes the global admin lock so a new admin can log in.
+ * Collection: adminactivesessions
  * Usage: node scripts/clear-admin-active-session.js
  */
 const path = require('path');
@@ -19,6 +20,7 @@ async function main() {
     .deleteMany({ singletonKey: 'global' });
 
   console.log(`Deleted ${result.deletedCount} active admin session record(s).`);
+  console.log('A new admin can log in now.');
   await mongoose.disconnect();
 }
 

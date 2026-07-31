@@ -1,4 +1,4 @@
-const { clientIp } = require('./captchaService');
+const { clientIp } = require('../utils/clientIp');
 
 // IPs hardcoded here are always blocked from registration.
 const STATIC_BLOCKED_IPS = new Set([
