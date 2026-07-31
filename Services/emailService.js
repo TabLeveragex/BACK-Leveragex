@@ -45,34 +45,43 @@ function getCustomHostTransportOptions(user, pass) {
   }
 
   return [
-    {
+    withSmtpTimeouts({
       host,
       port: Number(process.env.SMTP_PORT || 587),
       secure: String(process.env.SMTP_SECURE || '').toLowerCase() === 'true',
       auth: { user, pass },
-    },
+    }),
   ];
+}
+
+function withSmtpTimeouts(options) {
+  return {
+    ...options,
+    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 20000),
+    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 20000),
+    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 30000),
+  };
 }
 
 function getGmailTransportOptions(user, pass) {
   return [
-    {
+    withSmtpTimeouts({
       host: 'smtp.gmail.com',
       port: 587,
       secure: false,
       requireTLS: true,
       auth: { user, pass },
-    },
-    {
+    }),
+    withSmtpTimeouts({
       host: 'smtp.gmail.com',
       port: 465,
       secure: true,
       auth: { user, pass },
-    },
-    {
+    }),
+    withSmtpTimeouts({
       service: 'gmail',
       auth: { user, pass },
-    },
+    }),
   ];
 }
 
@@ -87,7 +96,7 @@ function getTransportOptionsList(user, pass) {
     return getGmailTransportOptions(user, pass);
   }
 
-  return [{ service, auth: { user, pass } }];
+  return [withSmtpTimeouts({ service, auth: { user, pass } })];
 }
 
 function buildFromAddress() {

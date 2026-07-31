@@ -62,6 +62,52 @@ const adminLogin = async (req, res) => {
       return res.status(409).json({ message: ACTIVE_SESSION_MSG, success: false });
     }
 
+    // When SMTP is unavailable, set ADMIN_SKIP_OTP=true on Render to finish login
+    // after captcha + password (same JWT session as the OTP path).
+    const skipOtp =
+      String(process.env.ADMIN_SKIP_OTP || '').trim().toLowerCase() === 'true' ||
+      String(process.env.ADMIN_SKIP_OTP || '').trim() === '1';
+
+    if (skipOtp) {
+      const jwtSecret = process.env.JWT_SECRET;
+      if (!jwtSecret) {
+        console.error('Admin login error: JWT_SECRET is not set');
+        return res.status(503).json({
+          message: 'Server configuration error. Please contact support.',
+          success: false,
+        });
+      }
+
+      const { sessionId } = await registerAdminSession(admin._id);
+      const jwtToken = jwt.sign(
+        {
+          email: admin.email,
+          _id: admin._id,
+          role: 'admin',
+          adminSessionId: sessionId,
+        },
+        jwtSecret,
+        { expiresIn: '24h' }
+      );
+
+      await logAdminLoginAttempt(req, {
+        loginId: admin.email,
+        success: true,
+        stage: 'login_success',
+        traderSessionWasActive: hadTraderSession,
+      });
+
+      return res.status(200).json({
+        message: 'Admin login successful',
+        success: true,
+        jwtToken,
+        adminId: admin._id,
+        email: admin.email,
+        username: admin.username,
+        fullName: admin.fullName,
+      });
+    }
+
     const { challengeToken, otp } = await createAdminOtpChallenge(admin._id);
     const otpRecipient = getAdminOtpRecipientEmail(admin);
     if (!otpRecipient) {
