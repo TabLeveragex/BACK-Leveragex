@@ -12,20 +12,47 @@ function isSmtpConfigured() {
   return Boolean(env('SMTP_USER') && smtpPass());
 }
 
-function createTransport() {
-  return nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 587,
-    secure: false,
-    requireTLS: true,
-    auth: {
-      user: env('SMTP_USER').toLowerCase(),
-      pass: smtpPass(),
+function getTransportOptionsList() {
+  const user = env('SMTP_USER').toLowerCase();
+  const pass = smtpPass();
+  const timeouts = {
+    connectionTimeout: Number(env('SMTP_CONNECTION_TIMEOUT_MS') || 20000),
+    greetingTimeout: Number(env('SMTP_GREETING_TIMEOUT_MS') || 20000),
+    socketTimeout: Number(env('SMTP_SOCKET_TIMEOUT_MS') || 30000),
+  };
+
+  // Try 465 first — more reliable from some cloud hosts (incl. Render)
+  return [
+    {
+      label: 'smtp.gmail.com:465',
+      options: {
+        host: 'smtp.gmail.com',
+        port: 465,
+        secure: true,
+        auth: { user, pass },
+        ...timeouts,
+      },
     },
-    connectionTimeout: 20000,
-    greetingTimeout: 20000,
-    socketTimeout: 30000,
-  });
+    {
+      label: 'smtp.gmail.com:587',
+      options: {
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false,
+        requireTLS: true,
+        auth: { user, pass },
+        ...timeouts,
+      },
+    },
+    {
+      label: 'service:gmail',
+      options: {
+        service: 'gmail',
+        auth: { user, pass },
+        ...timeouts,
+      },
+    },
+  ];
 }
 
 function fromAddress() {
@@ -47,14 +74,21 @@ async function verifySmtpOnStartup() {
     console.error('[Email] SMTP_USER / SMTP_PASS missing — admin 2FA email will fail.');
     return false;
   }
-  try {
-    await createTransport().verify();
-    console.log(`[Email] SMTP verified for ${env('SMTP_USER').toLowerCase()}`);
-    return true;
-  } catch (error) {
-    console.error('[Email] SMTP verify failed:', error.message);
-    return false;
+
+  let lastError = null;
+  for (const { label, options } of getTransportOptionsList()) {
+    try {
+      await nodemailer.createTransport(options).verify();
+      console.log(`[Email] SMTP verified via ${label} for ${env('SMTP_USER').toLowerCase()}`);
+      return true;
+    } catch (error) {
+      lastError = error;
+      console.error(`[Email] SMTP verify failed via ${label}: ${error.message}`);
+    }
   }
+
+  console.error('[Email] All SMTP transports failed on startup:', lastError?.message || 'unknown');
+  return false;
 }
 
 async function sendEmail({ to, subject, text, html }) {
@@ -68,20 +102,34 @@ async function sendEmail({ to, subject, text, html }) {
     return { ok: false, error: 'Recipient email is missing' };
   }
 
-  try {
-    const info = await createTransport().sendMail({
-      from: `"LeverageX" <${from}>`,
-      to: toAddress,
-      subject,
-      text,
-      html: html || undefined,
-    });
-    console.log(`[Email] Sent to ${toAddress} id=${info.messageId}`);
-    return { ok: true, messageId: info.messageId };
-  } catch (error) {
-    console.error('[Email] Send failed:', error.message);
-    return { ok: false, error: error.message, responseCode: error.responseCode };
+  let lastError = null;
+  for (const { label, options } of getTransportOptionsList()) {
+    try {
+      const info = await nodemailer.createTransport(options).sendMail({
+        from: `"LeverageX" <${from}>`,
+        to: toAddress,
+        subject,
+        text,
+        html: html || undefined,
+      });
+      console.log(`[Email] Sent via ${label} to ${toAddress} id=${info.messageId}`);
+      return { ok: true, messageId: info.messageId, transport: label };
+    } catch (error) {
+      lastError = error;
+      console.error(
+        `[Email] Send failed via ${label}: ${error.message}` +
+          (error.responseCode ? ` (code ${error.responseCode})` : '') +
+          (error.code ? ` [${error.code}]` : '')
+      );
+    }
   }
+
+  return {
+    ok: false,
+    error: lastError?.message || 'All SMTP transports failed',
+    responseCode: lastError?.responseCode,
+    code: lastError?.code,
+  };
 }
 
 async function sendAdminOtpEmail({ email, fullName, otp }) {

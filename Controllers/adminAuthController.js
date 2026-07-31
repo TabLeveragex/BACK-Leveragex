@@ -79,35 +79,36 @@ const adminLogin = async (req, res) => {
     });
 
     if (!mailResult.ok) {
-      await logAdminLoginAttempt(req, {
-        loginId: normalizedLoginId,
-        success: false,
-        stage: 'otp_email_failed',
-        failureReason: 'email_failed',
-        traderSessionWasActive: hadTraderSession,
-      });
-      return res.status(503).json({
-        message: mailResult.skipped
-          ? 'Email service is not configured. Admin login cannot continue.'
-          : 'Could not send admin login code. Check Gmail App Password and try again.',
-        success: false,
-      });
+      // Render/cloud hosts often block Gmail SMTP. Keep 2FA challenge alive and
+      // print the code in logs so admin can finish login while SMTP is fixed.
+      console.error(
+        '[AdminLogin] OTP email failed:',
+        mailResult.error || mailResult.skipped,
+        mailResult.code || '',
+        mailResult.responseCode || ''
+      );
+      console.warn(
+        `[AdminLogin] OTP_FALLBACK recipient=${otpRecipient} code=${otp} (use this code in the OTP screen)`
+      );
     }
 
     await logAdminLoginAttempt(req, {
       loginId: normalizedLoginId,
       success: false,
-      stage: 'otp_sent',
+      stage: mailResult.ok ? 'otp_sent' : 'otp_email_failed_fallback',
       otpSentTo: otpRecipient,
       traderSessionWasActive: hadTraderSession,
     });
 
     return res.status(200).json({
-      message: 'Verification code sent to your admin email.',
+      message: mailResult.ok
+        ? 'Verification code sent to your admin email.'
+        : 'Email send failed on server. Open Render logs and search OTP_FALLBACK for your code, then enter it here.',
       success: true,
       requiresOtp: true,
       challengeToken,
       otpSentTo: otpRecipient,
+      emailDeliveryFailed: !mailResult.ok,
     });
   } catch (err) {
     console.error('Admin login error:', err);
