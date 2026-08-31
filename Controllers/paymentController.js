@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const PayInOrder = require('../Models/PayInOrder');
 const {
   resolveProductAmount,
@@ -7,10 +8,12 @@ const {
 const { updateOrderFromGateway } = require('../Services/paymentFulfillmentService');
 const { computeAddFundsCredit } = require('../Services/addFundsCreditService');
 
-const PENDING_REUSE_MS = 15 * 60 * 1000;
-
 function isCustomFundProduct(productType) {
   return productType === 'CustomExclusive' || productType === 'AddFunds';
+}
+
+function buildMerchantOrderId(userId) {
+  return `lx_${String(userId)}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 }
 
 async function createPayIn(req, res) {
@@ -31,35 +34,9 @@ async function createPayIn(req, res) {
       gatewayAmount = addFundsMeta.creditRupees;
     }
 
-    const pendingQuery = {
-      userId: req.user.id,
-      productType,
-      status: 'pending',
-      createdAt: { $gte: new Date(Date.now() - PENDING_REUSE_MS) },
-    };
-    if (isCustomFundProduct(productType)) {
-      pendingQuery.requestedAmount = enteredAmount;
-    } else {
-      pendingQuery.amount = gatewayAmount;
-    }
-
-    const recentPending = await PayInOrder.findOne(pendingQuery).sort({ createdAt: -1 });
-
-    if (recentPending?.paymentUrl) {
-      return res.status(200).json({
-        success: true,
-        message: 'Redirecting to payment.',
-        orderId: recentPending.gatewayOrderId,
-        paymentUrl: recentPending.paymentUrl,
-        amount: recentPending.amount,
-        requestedAmount: recentPending.requestedAmount ?? enteredAmount,
-        payAmount: recentPending.amount,
-        productType,
-        reused: true,
-      });
-    }
-
-    const gateway = await createPayInOrder(gatewayAmount);
+    // Always create a fresh gateway order (never reuse pending for same amount).
+    const merchantOrderId = buildMerchantOrderId(req.user.id);
+    const gateway = await createPayInOrder(gatewayAmount, { merchantOrderId });
 
     const duplicateSuccess = await PayInOrder.findOne({
       gatewayOrderId: gateway.gatewayOrderId,
@@ -68,7 +45,19 @@ async function createPayIn(req, res) {
     if (duplicateSuccess) {
       return res.status(409).json({
         success: false,
-        message: 'This payment was already completed.',
+        message: 'This payment was already completed. Please try again.',
+      });
+    }
+
+    const existingPending = await PayInOrder.findOne({
+      gatewayOrderId: gateway.gatewayOrderId,
+      status: 'pending',
+    });
+    if (existingPending) {
+      // Gateway returned a stale order id — force uniqueness on our side by rejecting.
+      return res.status(503).json({
+        success: false,
+        message: 'Could not create a fresh payment order. Please try again.',
       });
     }
 
@@ -93,6 +82,7 @@ async function createPayIn(req, res) {
       requestedAmount: isCustomFundProduct(productType) ? enteredAmount : undefined,
       payAmount: gatewayAmount,
       productType,
+      reused: false,
     });
   } catch (err) {
     console.error('[Payment] createPayIn error:', err.message);

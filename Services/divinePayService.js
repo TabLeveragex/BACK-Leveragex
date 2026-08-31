@@ -42,10 +42,21 @@ function resolveProductAmount(productType, amountInput) {
   return { error: 'Invalid payment product.' };
 }
 
-async function createPayInOrder(amount) {
+async function createPayInOrder(amount, options = {}) {
   const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error('DIVINE_PAY_API_KEY is not configured on the server.');
+  }
+
+  const merchantOrderId = String(options.merchantOrderId || '').trim();
+  const requestBody = {
+    amount: Number(amount),
+  };
+  // Unique client reference so gateway does not reuse an old order for the same amount.
+  if (merchantOrderId) {
+    requestBody.merchant_order_id = merchantOrderId;
+    requestBody.client_order_id = merchantOrderId;
+    requestBody.reference = merchantOrderId;
   }
 
   const url = `${getBaseUrl()}${getCreatePath()}`;
@@ -56,7 +67,7 @@ async function createPayInOrder(amount) {
       'x-api-key': apiKey,
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({ amount: Number(amount) }),
+    body: JSON.stringify(requestBody),
   });
 
   const data = await response.json().catch(() => ({}));
