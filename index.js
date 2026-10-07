@@ -41,6 +41,8 @@ const allowedOrigins = [
   'https://leveragex-2uvw.onrender.com',
   'https://leveragex.shop',
   'https://www.leveragex.shop',
+  'https://www.leveragex.store',
+  'https://leveragex.store',
   'http://localhost:3000',
   'http://127.0.0.1:3000',
   ...(process.env.ALLOWED_ORIGINS || '')
